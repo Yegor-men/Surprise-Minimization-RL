@@ -1,13 +1,17 @@
 import math
 import os
+import random
 from random import randint
+
+random.seed(0)
 from collections import deque
 
 import pygame
 from pygame.locals import *
 
-FPS = 60
+FPS = 30
 ANIMATION_SPEED = 0.18
+# ANIMATION_SPEED = 0.1
 WIN_WIDTH = 284 * 2
 WIN_HEIGHT = 512
 
@@ -15,7 +19,7 @@ WIN_HEIGHT = 512
 class Bird(pygame.sprite.Sprite):
     WIDTH = HEIGHT = 32
     SINK_SPEED = 0.18
-    CLIMB_SPEED = 0.3
+    CLIMB_SPEED = 0.18
     CLIMB_DURATION = 333.3
 
     def __init__(self, x, y, msec_to_climb, images):
@@ -28,10 +32,13 @@ class Bird(pygame.sprite.Sprite):
 
     def update(self, delta_frames=1):
         if self.msec_to_climb > 0:
-            frac_climb_done = 1 - self.msec_to_climb / Bird.CLIMB_DURATION
-            self.y -= (Bird.CLIMB_SPEED * frames_to_msec(delta_frames) *
-                       (1 - math.cos(frac_climb_done * math.pi)))
-            self.msec_to_climb -= frames_to_msec(delta_frames)
+            # frac_climb_done = 1 - self.msec_to_climb / Bird.CLIMB_DURATION
+            # self.y -= (Bird.CLIMB_SPEED * frames_to_msec(delta_frames) *
+            #            (1 - math.cos(frac_climb_done * math.pi)))
+            self.y -= Bird.CLIMB_SPEED * frames_to_msec(delta_frames)
+            # self.msec_to_climb -= frames_to_msec(delta_frames)
+            self.msec_to_climb = 0
+        # THIS MAKES BIRD ALWAYS FALL
         else:
             self.y += Bird.SINK_SPEED * frames_to_msec(delta_frames)
 
@@ -135,8 +142,27 @@ def msec_to_frames(milliseconds, fps=FPS):
     return fps * milliseconds / 1000.0
 
 
+def is_bird_between_pipes(bird, pipe):
+    # Check horizontal overlap: bird's right side is after pipe's left edge
+    # and bird's left side is before pipe's right edge.
+    if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH:
+        return False
+
+    # Define the vertical boundaries of the gap:
+    gap_top = pipe.top_height_px  # bottom of top pipe
+    gap_bottom = WIN_HEIGHT - pipe.bottom_height_px  # top of bottom pipe
+
+    # Use the bird's vertical center for a robust check.
+    bird_center_y = bird.y + Bird.HEIGHT / 2
+
+    return gap_top < bird_center_y < gap_bottom
+
+
 import numpy as np
 import torch
+
+torch.manual_seed(0)
+torch.cuda.manual_seed_all(0)
 
 
 def get_screenshot():
@@ -149,7 +175,12 @@ def get_screenshot():
 
 import flappybird_model
 
-model = flappybird_model.Model(256)
+model = flappybird_model.Model(
+    hidden_size=1024,
+    image_latent_size=1024,
+    memory_length=8,
+    noise=0.2
+)
 loss_fn = flappybird_model.RewardFunction()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 model.train()
@@ -189,6 +220,7 @@ def main():
     done = paused = False
 
     touching_pipe, touched_pipe = False, False
+    model_go = True
 
     while not done:
         clock.tick(FPS)
@@ -215,28 +247,6 @@ def main():
         else:
             touching_pipe = False
 
-        screenshot = get_screenshot()
-        touching = torch.ones(1) if touching_pipe else torch.zeros(1)
-
-        new_lat, pred_lat, output, is_touch = model(screenshot, touching)
-        loss, s_factor = loss_fn(new_lat, pred_lat, is_touch)
-        loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-        model.update_hidden_values(
-            new_latent=new_lat,
-            output=output
-        )
-        print(f"L {loss.item():.3f}", end=" | ")
-        losses.append(loss.item())
-        print(f"S factor {s_factor.item():.3f}", end=" | ")
-        s_factors.append(s_factor.item())
-        print(f"Out {output.item():.5f}", end=" | ")
-        outputs.append(output.item())
-        print()
-        if round(output.item()) == 1:
-            bird.msec_to_climb = Bird.CLIMB_DURATION
-
         for x in (0, WIN_WIDTH / 2):
             display_surface.blit(images['background'], (x, 0))
 
@@ -245,7 +255,28 @@ def main():
 
         for p in pipes:
             p.update()
+            is_between_pipes = True if is_bird_between_pipes(bird, p) else False
             display_surface.blit(p.image, p.rect)
+
+        screenshot = get_screenshot()
+        touching = torch.ones(1) if touching_pipe else torch.zeros(1)
+
+        if model_go is True:
+            i, h, c, ph, o = model(screenshot)
+            loss, s_factor = loss_fn(model.memory.get_newest(), touching, is_between_pipes)
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            print(f"L {loss.item():.3f}", end=" | ")
+            losses.append(loss.item())
+            print(f"S factor {s_factor.item():.3f}", end=" | ")
+            s_factors.append(s_factor.item())
+            print(f"Out {o.squeeze().item():.5f}", end=" | ")
+            outputs.append(o.squeeze().item())
+            print()
+            if round(o.squeeze().item()) == 1:
+                bird.msec_to_climb = Bird.CLIMB_DURATION
 
         bird.update()
         display_surface.blit(bird.image, bird.rect)
@@ -260,14 +291,9 @@ def main():
                     scores.append(0)
                 touched_pipe = False
 
-        # score_surface = score_font.render(str(score), True, (255, 255, 255))
-        # score_x = WIN_WIDTH / 2 - score_surface.get_width() / 2
-        # display_surface.blit(score_surface, (score_x, PipePair.PIECE_HEIGHT))
-
         pygame.display.flip()
         frame_clock += 1
 
-    # print(f"Game over! Scores: {scores}")
     pygame.quit()
 
 
@@ -290,21 +316,6 @@ axes[2].set_title('Output')
 
 axes[3].plot(scores)
 axes[3].set_title('Scores')
-
-# axes[4].plot(loss_history)
-# axes[4].set_title('Loss (lower is better)')
-#
-# axes[5].plot(surprise_factor_history)
-# axes[5].set_title('Surprise Factor')
-#
-# axes[6].plot(battery_hist)
-# axes[6].set_title('Battery')
-#
-# axes[7].plot(v_reward_history, label="Velocity")
-# axes[7].plot(s_reward_history, label="S factor")
-# axes[7].plot(total_reward_history, label="Total")
-# axes[7].set_title('Reward')
-# axes[7].legend()
 
 plt.tight_layout()
 
