@@ -6,12 +6,13 @@ torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
 
-def resize_to_multiple_of(tensor: torch.Tensor, mode="bicubic") -> torch.Tensor:
+def resize_to_multiple_of(tensor: torch.Tensor, mode="bicubic"):
     multiple = 16
     orig_h, orig_w = tensor.shape[-2], tensor.shape[-1]
 
     new_h = round(orig_h / multiple) * multiple
     new_w = round(orig_w / multiple) * multiple
+    total = new_h * new_w * tensor.shape[-3]
 
     if tensor.ndim == 3:  # (C, H, W)
         tensor = tensor.unsqueeze(0)  # Add batch dim -> (1, C, H, W)
@@ -20,7 +21,7 @@ def resize_to_multiple_of(tensor: torch.Tensor, mode="bicubic") -> torch.Tensor:
     else:  # (N, C, H, W)
         resized = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
 
-    return resized
+    return resized, new_h, new_w, total
 
 
 class VAELoss(nn.Module):
@@ -56,6 +57,9 @@ class Decoder(nn.Module):
         return n_o
 
 
+import numpy as np
+import cv2
+
 class Model(nn.Module):
     def __init__(self, hidden_size, image_latent_size):
         super().__init__()
@@ -76,7 +80,7 @@ class Model(nn.Module):
         )
         self.fc_mu = nn.LazyLinear(image_latent_size)
         self.fc_logvar = nn.LazyLinear(image_latent_size)
-        self.z_fc = nn.LazyLinear(4*int(512/16)*int(576/16))
+        self.z_fc = nn.LazyLinear(4 * int(512 / 16) * int(576 / 16))
         # self.z = nn.LazyLinear(image_latent_size)
         self.vae_dec = nn.Sequential(
             nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
@@ -97,7 +101,7 @@ class Model(nn.Module):
         self.h = self.h.detach()
         self.c = self.c.detach()
         """ Image size is [3, 512, 568] """
-        resized_image = resize_to_multiple_of(image)
+        resized_image, h, w, total = resize_to_multiple_of(image)
         """ Resized to [1, 3, 512, 576] """
         encoded_image = self.vae_enc(resized_image)
         mu = self.fc_mu(encoded_image)
@@ -109,6 +113,9 @@ class Model(nn.Module):
         z_fc = self.z_fc(z)
         z_reshaped = torch.reshape(z_fc, (1, 4, 32, 36))
         reconstructed_image = self.vae_dec(z_reshaped)
+        numpy_image = reconstructed_image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
+        cv2.imshow("VAE reconstruction", numpy_image)
+        cv2.waitKey(1)
         # reconstructed_image = self.vae_dec(encoded_image)
 
         vae_loss = self.vae_loss(resized_image, reconstructed_image, mu, logvar)
@@ -127,7 +134,7 @@ class RewardFunction(nn.Module):
         super().__init__()
 
     def forward(self, vae_loss, euclid_dist, is_touching, is_between):
-        reward_value = float(is_touching) + float(is_between)
+        reward_value = -float(is_touching)*10 + float(is_between)*10
         reward = torch.tensor([reward_value])
         exp_reward = torch.exp(-reward).to("cuda")
         loss = vae_loss + euclid_dist + exp_reward

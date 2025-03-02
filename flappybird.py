@@ -180,15 +180,15 @@ def get_screenshot():
 import flappybird_model
 
 model = flappybird_model.Model(
-    hidden_size=4096,
-    image_latent_size=4096,
+    hidden_size=2048,
+    image_latent_size=2048,
 ).to("cuda")
 decoder = flappybird_model.Decoder(
-    hidden_size=4096,
+    hidden_size=2048,
     temperature=0.2
 ).to("cuda")
 loss_fn = flappybird_model.RewardFunction()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 model.train()
 optimizer.zero_grad()
 
@@ -259,7 +259,7 @@ def main():
         for p in pipes:
             p.update()
             if is_bird_between_pipes(bird, p):
-                is_between_pipes = True
+                is_between_pipes = True if not is_touching_pipe else False
             display_surface.blit(p.image, p.rect)
 
         screenshot = get_screenshot()
@@ -274,12 +274,14 @@ def main():
 
             print(f"L {loss.item():.3f}", end=" | ")
             losses.append(loss.item())
-            print(f"VAE L {vae_loss.item():.3f}", end=" | ")
+            print(f"VAE L {vae_loss.item():,}", end=" | ")
             vae_losses.append(vae_loss.item())
-            print(f"S factor {euclid_dist.item():.3f}", end=" | ")
+            print(f"S factor {euclid_dist.item():.5f}", end=" | ")
             s_factors.append(euclid_dist.item())
-            print(f"Out {no.squeeze().item():.5f}", end=" | ")
+            print(f"Out {no.squeeze().item():.2f}", end=" | ")
             outputs.append(no.squeeze().item())
+            print(f"Between: {is_between_pipes}", end=" | ")
+            print(f"Touching: {is_touching_pipe}", end=" | ")
             print()
             if round(no.squeeze().item()) == 1:
                 bird.msec_to_climb = Bird.CLIMB_DURATION
