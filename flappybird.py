@@ -188,16 +188,13 @@ model.train()
 optimizer.zero_grad()
 
 losses = []
+vae_losses = []
 s_factors = []
 outputs = []
 scores = [0]
 
 
 def main():
-    global losses
-    global s_factors
-    global outputs
-    global scores
 
     pygame.init()
 
@@ -272,6 +269,8 @@ def main():
 
             print(f"L {loss.item():.3f}", end=" | ")
             losses.append(loss.item())
+            print(f"VAE L {vae_loss.item():.3f}", end=" | ")
+            vae_losses.append(vae_loss.item())
             print(f"S factor {euclic_dist.item():.3f}", end=" | ")
             s_factors.append(euclic_dist.item())
             print(f"Out {model.o_o.squeeze().item():.5f}", end=" | ")
@@ -303,21 +302,27 @@ main()
 
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+fig, axes = plt.subplots(2, 3, figsize=(10, 10))
 
 axes = axes.flatten()
 
 axes[0].plot(losses)
 axes[0].set_title('Loss')
 
-axes[1].plot(s_factors)
-axes[1].set_title('S factor')
+# axes[1].plot(vae_losses)
+# axes[1].set_title('VAE loss')
 
-axes[2].plot(outputs)
-axes[2].set_title('Output')
+axes[2].plot(vae_losses)
+axes[2].set_title('VAE Loss')
 
-axes[3].plot(scores)
-axes[3].set_title('Scores')
+axes[3].plot(s_factors)
+axes[3].set_title('S factor')
+
+axes[4].plot(outputs)
+axes[4].set_title('Output')
+
+axes[5].plot(scores)
+axes[5].set_title('Scores')
 
 plt.tight_layout()
 
