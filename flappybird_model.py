@@ -7,7 +7,7 @@ torch.cuda.manual_seed_all(0)
 
 
 def resize_to_multiple_of(tensor: torch.Tensor, mode="bicubic"):
-    multiple = 16
+    multiple = 8
     orig_h, orig_w = tensor.shape[-2], tensor.shape[-1]
 
     new_h = round(orig_h / multiple) * multiple
@@ -60,6 +60,7 @@ class Decoder(nn.Module):
 import numpy as np
 import cv2
 
+
 class Model(nn.Module):
     def __init__(self, hidden_size, image_latent_size):
         super().__init__()
@@ -72,20 +73,14 @@ class Model(nn.Module):
             nn.LeakyReLU(),
             nn.Conv2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=8, out_channels=8, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
             nn.Conv2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
             nn.Flatten()
         )
         self.fc_mu = nn.LazyLinear(image_latent_size)
         self.fc_logvar = nn.LazyLinear(image_latent_size)
-        self.z_fc = nn.LazyLinear(4 * int(512 / 16) * int(576 / 16))
-        # self.z = nn.LazyLinear(image_latent_size)
+        self.z_fc = nn.LazyLinear(4 * int(512 / 8) * int(568 / 8))
         self.vae_dec = nn.Sequential(
             nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(in_channels=8, out_channels=8, kernel_size=2, stride=2, padding=0),
             nn.LeakyReLU(),
             nn.ConvTranspose2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
             nn.LeakyReLU(),
@@ -100,26 +95,23 @@ class Model(nn.Module):
     def forward(self, image, o_o):
         self.h = self.h.detach()
         self.c = self.c.detach()
-        """ Image size is [3, 512, 568] """
+
         resized_image, h, w, total = resize_to_multiple_of(image)
-        """ Resized to [1, 3, 512, 576] """
         encoded_image = self.vae_enc(resized_image)
         mu = self.fc_mu(encoded_image)
         logvar = self.fc_logvar(encoded_image)
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         z = mu + eps * std
-        # z = self.z(nn.Flatten()(encoded_image))
         z_fc = self.z_fc(z)
-        z_reshaped = torch.reshape(z_fc, (1, 4, 32, 36))
+        z_reshaped = torch.reshape(z_fc, (1, 4, 64, 71))
         reconstructed_image = self.vae_dec(z_reshaped)
+
         numpy_image = reconstructed_image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
         cv2.imshow("VAE reconstruction", numpy_image)
         cv2.waitKey(1)
-        # reconstructed_image = self.vae_dec(encoded_image)
 
         vae_loss = self.vae_loss(resized_image, reconstructed_image, mu, logvar)
-        # vae_loss = F.mse_loss(reconstructed_image, resized_image, reduction='sum')
 
         n_h, n_c = self.lstm_main(z, (self.h, self.c))
         p_h, _ = self.lstm_pred(o_o, (self.h, self.c))
@@ -134,7 +126,7 @@ class RewardFunction(nn.Module):
         super().__init__()
 
     def forward(self, vae_loss, euclid_dist, is_touching, is_between):
-        reward_value = -float(is_touching)*10 + float(is_between)*10
+        reward_value = -float(is_touching) * 10 + float(is_between) * 10
         reward = torch.tensor([reward_value])
         exp_reward = torch.exp(-reward).to("cuda")
         loss = vae_loss + euclid_dist + exp_reward
