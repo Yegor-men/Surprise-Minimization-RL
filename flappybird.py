@@ -162,6 +162,8 @@ def is_bird_between_pipes(bird, pipe):
 import numpy as np
 import torch
 
+torch.autograd.set_detect_anomaly(True)
+
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
@@ -171,17 +173,20 @@ def get_screenshot():
     arr = pygame.surfarray.array3d(surface)
     tensor = torch.from_numpy(arr).float()
     tensor = tensor.permute(2, 1, 0)
-    tensor = tensor / 255
-    return tensor
+    tensor = (tensor / 255)
+    return tensor.to("cuda")
 
 
 import flappybird_model
 
 model = flappybird_model.Model(
-    hidden_size=1024,
-    image_latent_size=1024,
+    hidden_size=4096,
+    image_latent_size=4096,
+).to("cuda")
+decoder = flappybird_model.Decoder(
+    hidden_size=4096,
     temperature=0.2
-)
+).to("cuda")
 loss_fn = flappybird_model.RewardFunction()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 model.train()
@@ -195,7 +200,6 @@ scores = [0]
 
 
 def main():
-
     pygame.init()
 
     display_surface = pygame.display.set_mode((WIN_WIDTH, WIN_HEIGHT))
@@ -261,22 +265,23 @@ def main():
         screenshot = get_screenshot()
 
         if model_go is True:
-            vae_loss, euclic_dist = model(screenshot)
-            loss = loss_fn(vae_loss, euclic_dist, is_touching_pipe, is_between_pipes)
+            vae_loss, euclid_dist, nh = model(screenshot, decoder.o_o)
+            loss = loss_fn(vae_loss, euclid_dist, is_touching_pipe, is_between_pipes)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
+            no = decoder(nh)
 
             print(f"L {loss.item():.3f}", end=" | ")
             losses.append(loss.item())
             print(f"VAE L {vae_loss.item():.3f}", end=" | ")
             vae_losses.append(vae_loss.item())
-            print(f"S factor {euclic_dist.item():.3f}", end=" | ")
-            s_factors.append(euclic_dist.item())
-            print(f"Out {model.o_o.squeeze().item():.5f}", end=" | ")
-            outputs.append(model.o_o.squeeze().item())
+            print(f"S factor {euclid_dist.item():.3f}", end=" | ")
+            s_factors.append(euclid_dist.item())
+            print(f"Out {no.squeeze().item():.5f}", end=" | ")
+            outputs.append(no.squeeze().item())
             print()
-            if round(model.o_o.squeeze().item()) == 1:
+            if round(no.squeeze().item()) == 1:
                 bird.msec_to_climb = Bird.CLIMB_DURATION
 
         bird.update()
@@ -302,7 +307,7 @@ main()
 
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(2, 3, figsize=(10, 10))
+fig, axes = plt.subplots(3, 2, figsize=(10, 15))
 
 axes = axes.flatten()
 
