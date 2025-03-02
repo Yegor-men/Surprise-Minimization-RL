@@ -177,7 +177,6 @@ def get_screenshot():
 
 import flappybird_model
 
-MEMORY_LENGTH = 8
 model = flappybird_model.Model(
     hidden_size=1024,
     image_latent_size=1024,
@@ -224,8 +223,6 @@ def main():
     is_touching_pipe, touched_pipe = False, False
     model_go = True
 
-    current_frame = 0
-
     while not done:
         clock.tick(FPS)
 
@@ -269,13 +266,9 @@ def main():
         if model_go is True:
             vae_loss, euclic_dist = model(screenshot)
             loss = loss_fn(vae_loss, euclic_dist, is_touching_pipe, is_between_pipes)
-
-            current_frame += 1
-            if current_frame % (MEMORY_LENGTH + 1) == 0:
-                loss.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-                current_frame = 0
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
 
             print(f"L {loss.item():.3f}", end=" | ")
             losses.append(loss.item())
