@@ -1,76 +1,98 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
-from collections import deque
+
+def resize_to_multiple_of_16(tensor: torch.Tensor, mode="bicubic") -> torch.Tensor:
+    orig_h, orig_w = tensor.shape[-2], tensor.shape[-1]
+
+    new_h = round(orig_h / 16) * 16
+    new_w = round(orig_w / 16) * 16
+
+    if tensor.ndim == 3:  # (C, H, W)
+        tensor = tensor.unsqueeze(0)  # Add batch dim -> (1, C, H, W)
+        resized = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
+        # resized = resized.squeeze(0)  # Remove batch dim -> (C, H, W)
+    else:  # (N, C, H, W)
+        resized = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
+
+    return resized
 
 
-class FixedSizeQueue:
-    def __init__(self, max_length: int, hidden_size: int, output_size: int, input_size: tuple[int, int, int]):
-        c, h, w = input_size
-        s_input = torch.zeros([c, h, w])
-        s_h = torch.zeros(1, hidden_size)
-        s_c = torch.zeros(1, hidden_size)
-        s_ph = torch.zeros(1, hidden_size)
-        s_out = torch.zeros(1, output_size)
+class VAELoss(nn.Module):
+    def __init__(self):
+        super().__init__()
 
-        self.queue = deque([(
-            s_input.clone(),
-            s_h.clone(),
-            s_c.clone(),
-            s_ph.clone(),
-            s_out.clone()
-        ) for _ in range(max_length)], maxlen=max_length)
-
-    def enqueue(self, input, new_h, new_c, pred_h, output):
-        self.queue.append((input, new_h, new_c, pred_h, output))
-        self.detach_oldest()
-
-    def detach_oldest(self):
-        oldest_item = self.queue[0]
-        self.queue[0] = tuple(tensor.detach() for tensor in oldest_item)
-
-    def get_newest(self):
-        i, h, c, ph, o = self.queue[-1]
-        return i, h, c, ph, o
+    def forward(self, x, x_reconstruction, mu, logvar):
+        recon_loss = F.mse_loss(x_reconstruction, x, reduction='sum')  # or mean
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return recon_loss + kl_loss
 
 
 class Model(nn.Module):
-    def __init__(self, hidden_size, noise, memory_length, image_latent_size):
-        """ Image size is [3, 512, 568] """
+    def __init__(self, hidden_size, image_latent_size, temperature):
         super().__init__()
 
-        self.memory = FixedSizeQueue(
-            max_length=memory_length,
-            hidden_size=hidden_size,
-            output_size=1,
-            input_size=(3, 512, 568)
+        self.h = torch.zeros(1, hidden_size)
+        self.c = torch.zeros(1, hidden_size)
+        self.o_o = torch.zeros(1, 1)
+
+        self.temperature = temperature
+
+        self.vae_enc = nn.Sequential(
+            nn.Conv2d(in_channels=3, out_channels=8, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=64, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=64, out_channels=32, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=32, out_channels=16, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=8, out_channels=4, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=4, out_channels=2, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Conv2d(in_channels=2, out_channels=1, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.Flatten()
         )
-
-        self.noise = noise
-
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=8, kernel_size=3, stride=2, padding=0),
+        self.fc_mu = nn.LazyLinear(image_latent_size)
+        self.fc_logvar = nn.LazyLinear(image_latent_size)
+        self.z_fc = nn.LazyLinear(1152)
+        self.vae_dec = nn.Sequential(
+            nn.ConvTranspose2d(in_channels=1, out_channels=2, kernel_size=1, stride=1, padding=0),
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=8, out_channels=16, kernel_size=3, stride=2, padding=0),
+            nn.ConvTranspose2d(in_channels=2, out_channels=4, kernel_size=1, stride=1, padding=0),
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=16, out_channels=8, kernel_size=3, stride=2, padding=0),
+            nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=1, stride=1, padding=0),
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=8, out_channels=1, kernel_size=3, stride=2, padding=0),
-            nn.Flatten(),
-            nn.LazyLinear(out_features=image_latent_size),
-            nn.LeakyReLU()
+            nn.ConvTranspose2d(in_channels=8, out_channels=16, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=16, out_channels=32, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=32, out_channels=64, kernel_size=1, stride=1, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=64, out_channels=32, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=32, out_channels=16, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=16, out_channels=8, kernel_size=2, stride=2, padding=0),
+            nn.LeakyReLU(),
+            nn.ConvTranspose2d(in_channels=8, out_channels=3, kernel_size=2, stride=2, padding=0)
         )
+        self.vae_loss = VAELoss()
 
-        self.LSTMCell = nn.LSTMCell(input_size=image_latent_size, hidden_size=hidden_size)
-
-        self.predict_h = nn.Sequential(
-            nn.LazyLinear(out_features=hidden_size * 2),
-            nn.LeakyReLU(),
-            nn.LazyLinear(out_features=hidden_size)
-        )
+        self.lstm_main = nn.LSTMCell(input_size=image_latent_size, hidden_size=hidden_size)
+        self.lstm_pred = nn.LSTMCell(input_size=1, hidden_size=hidden_size)
 
         self.decoder = nn.Sequential(
             nn.LazyLinear(out_features=hidden_size),
@@ -78,34 +100,45 @@ class Model(nn.Module):
             nn.LazyLinear(out_features=1)
         )
 
-    def forward(self, image):
-        o_i, o_h, o_c, o_ph, o_o = self.memory.get_newest()
+    def forward(self, image: torch.Tensor):
+        """ Image size is [3, 512, 568] """
+        resized_image = resize_to_multiple_of_16(image)
+        """ Resized to [1, 3, 512, 576] """
+        encoded_image = self.vae_enc(resized_image)
+        mu = self.fc_mu(encoded_image)
+        logvar = self.fc_logvar(encoded_image)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        z_fc = self.z_fc(z)
+        z_reshaped = torch.reshape(z_fc, (1, 1, 32, 36))
+        reconstructed_image = self.vae_dec(z_reshaped)
 
-        image_latent = self.image_encoder(image)
-        # temp1 = torch.cat([image_latent, is_touching], dim=0)
-        n_h, n_c = self.LSTMCell(image_latent, (o_h, o_c))
+        vae_loss = self.vae_loss(resized_image, reconstructed_image, mu, logvar)
 
-        temp2 = torch.cat([o_h, o_o], dim=1)
-        n_ph = self.predict_h(temp2)
+        n_h, n_c = self.lstm_main(z, (self.h, self.c))
+        ph, _ = self.lstm_pred(self.o_o, (self.h, self.c))
 
-        outputs = self.decoder(n_h)
-        dist = torch.distributions.RelaxedBernoulli(temperature=self.noise, logits=outputs)
+        euclid_dist = torch.cdist(n_h, ph)
+
+        output = self.decoder(n_h)
+        dist = torch.distributions.RelaxedBernoulli(temperature=self.temperature, logits=output)
         n_o = dist.rsample()
 
-        self.memory.enqueue(image, n_h, n_c, n_ph, n_o)
+        self.h = n_h.detach()
+        self.c = n_c.detach()
+        self.o_o = n_o.detach()
 
-        return image, n_h, n_c, n_ph, n_o
+        return vae_loss, euclid_dist.squeeze()
 
 
 class RewardFunction(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, memory_entry, is_touching, is_between):
-        i, h, c, ph, o = memory_entry
-
-        euclid_dist = torch.cdist(h, ph)
-        between = torch.ones(1, 1) if is_between else torch.zeros(1, 1)
-        reward = -euclid_dist - is_touching + between
-        loss = torch.exp(-reward)
-        return loss, euclid_dist
+    def forward(self, vae_loss, euclid_dist, is_touching, is_between):
+        reward_value = float(is_touching) + float(is_between)
+        reward = torch.tensor([reward_value])
+        exp_reward = torch.exp(-reward)
+        loss = vae_loss + euclid_dist + exp_reward
+        return loss

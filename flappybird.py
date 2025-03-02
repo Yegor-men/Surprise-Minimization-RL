@@ -147,15 +147,16 @@ def is_bird_between_pipes(bird, pipe):
     # and bird's left side is before pipe's right edge.
     if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH:
         return False
-
-    # Define the vertical boundaries of the gap:
-    gap_top = pipe.top_height_px  # bottom of top pipe
-    gap_bottom = WIN_HEIGHT - pipe.bottom_height_px  # top of bottom pipe
-
-    # Use the bird's vertical center for a robust check.
-    bird_center_y = bird.y + Bird.HEIGHT / 2
-
-    return gap_top < bird_center_y < gap_bottom
+    else:
+        return True
+    # # Define the vertical boundaries of the gap:
+    # gap_top = pipe.top_height_px  # bottom of top pipe
+    # gap_bottom = WIN_HEIGHT - pipe.bottom_height_px  # top of bottom pipe
+    #
+    # # Use the bird's vertical center for a robust check.
+    # bird_center_y = bird.y + Bird.HEIGHT / 2
+    #
+    # return gap_top < bird_center_y < gap_bottom
 
 
 import numpy as np
@@ -169,17 +170,18 @@ def get_screenshot():
     surface = pygame.display.get_surface()
     arr = pygame.surfarray.array3d(surface)
     tensor = torch.from_numpy(arr).float()
-    tensor = tensor.permute(2, 0, 1)
+    tensor = tensor.permute(2, 1, 0)
+    tensor = tensor / 255
     return tensor
 
 
 import flappybird_model
 
+MEMORY_LENGTH = 8
 model = flappybird_model.Model(
     hidden_size=1024,
     image_latent_size=1024,
-    memory_length=8,
-    noise=0.2
+    temperature=0.2
 )
 loss_fn = flappybird_model.RewardFunction()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
@@ -219,8 +221,10 @@ def main():
     frame_clock = 0
     done = paused = False
 
-    touching_pipe, touched_pipe = False, False
+    is_touching_pipe, touched_pipe = False, False
     model_go = True
+
+    current_frame = 0
 
     while not done:
         clock.tick(FPS)
@@ -243,9 +247,9 @@ def main():
 
         pipe_collision = any(p.collides_with(bird) for p in pipes)
         if pipe_collision:
-            touching_pipe, touched_pipe = True, True
+            is_touching_pipe, touched_pipe = True, True
         else:
-            touching_pipe = False
+            is_touching_pipe = False
 
         for x in (0, WIN_WIDTH / 2):
             display_surface.blit(images['background'], (x, 0))
@@ -253,29 +257,34 @@ def main():
         while pipes and not pipes[0].visible:
             pipes.popleft()
 
+        is_between_pipes = False
         for p in pipes:
             p.update()
-            is_between_pipes = True if is_bird_between_pipes(bird, p) else False
+            if is_bird_between_pipes(bird, p):
+                is_between_pipes = True
             display_surface.blit(p.image, p.rect)
 
         screenshot = get_screenshot()
-        touching = torch.ones(1) if touching_pipe else torch.zeros(1)
 
         if model_go is True:
-            i, h, c, ph, o = model(screenshot)
-            loss, s_factor = loss_fn(model.memory.get_newest(), touching, is_between_pipes)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
+            vae_loss, euclic_dist = model(screenshot)
+            loss = loss_fn(vae_loss, euclic_dist, is_touching_pipe, is_between_pipes)
+
+            current_frame += 1
+            if current_frame % (MEMORY_LENGTH + 1) == 0:
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                current_frame = 0
 
             print(f"L {loss.item():.3f}", end=" | ")
             losses.append(loss.item())
-            print(f"S factor {s_factor.item():.3f}", end=" | ")
-            s_factors.append(s_factor.item())
-            print(f"Out {o.squeeze().item():.5f}", end=" | ")
-            outputs.append(o.squeeze().item())
+            print(f"S factor {euclic_dist.item():.3f}", end=" | ")
+            s_factors.append(euclic_dist.item())
+            print(f"Out {model.o_o.squeeze().item():.5f}", end=" | ")
+            outputs.append(model.o_o.squeeze().item())
             print()
-            if round(o.squeeze().item()) == 1:
+            if round(model.o_o.squeeze().item()) == 1:
                 bird.msec_to_climb = Bird.CLIMB_DURATION
 
         bird.update()
