@@ -6,24 +6,6 @@ torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
 
 
-def resize_to_multiple_of(tensor: torch.Tensor, mode="bicubic"):
-    multiple = 8
-    orig_h, orig_w = tensor.shape[-2], tensor.shape[-1]
-
-    new_h = round(orig_h / multiple) * multiple
-    new_w = round(orig_w / multiple) * multiple
-    total = new_h * new_w * tensor.shape[-3]
-
-    if tensor.ndim == 3:  # (C, H, W)
-        tensor = tensor.unsqueeze(0)  # Add batch dim -> (1, C, H, W)
-        resized = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
-        # resized = resized.squeeze(0)  # Remove batch dim -> (C, H, W)
-    else:  # (N, C, H, W)
-        resized = F.interpolate(tensor, size=(new_h, new_w), mode=mode, align_corners=False)
-
-    return resized, new_h, new_w, total
-
-
 class VAELoss(nn.Module):
     def __init__(self):
         super().__init__()
@@ -60,6 +42,52 @@ class Decoder(nn.Module):
 import numpy as np
 import cv2
 
+class CNNOneToOne(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride, dilation):
+        super().__init__()
+        self.activation = nn.LeakyReLU()
+        self.cnn = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=kernel_size -1,
+            dilation=dilation,
+        )
+
+    def forward(self, image):
+        temp = self.activation(self.cnn(image))
+        residual = temp + image
+        return residual
+
+class CNNHalver(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.activation = nn.LeakyReLU()
+        self.cnn = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=2,
+            padding=(kernel_size//2)-1,
+        )
+
+    def forward(self, image):
+        return self.activation(self.cnn(image))
+
+class CNNDoubler(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size):
+        super().__init__()
+        self.activation = nn.LeakyReLU()
+        self.cnn = nn.ConvTranspose2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            stride=2,
+            padding=(kernel_size//2)-1,
+        )
+    def forward(self, image):
+        return self.activation(self.cnn(image))
 
 class Model(nn.Module):
     def __init__(self, hidden_size, image_latent_size):
@@ -69,22 +97,28 @@ class Model(nn.Module):
         self.c = torch.zeros(1, hidden_size).to("cuda")
 
         self.vae_enc = nn.Sequential(
-            nn.Conv2d(in_channels=3, out_channels=4, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.Conv2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
+            # nn.Conv2d(in_channels=3, out_channels=4, kernel_size=2, stride=2, padding=0),
+            # nn.LeakyReLU(),
+            # nn.Conv2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
+            # nn.LeakyReLU(),
+            # nn.Conv2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
+            CNNHalver(in_channels=3, out_channels=4, kernel_size=4),
+            CNNHalver(in_channels=4, out_channels=8, kernel_size=4),
+            CNNHalver(in_channels=8, out_channels=4, kernel_size=4),
             nn.Flatten()
         )
         self.fc_mu = nn.LazyLinear(image_latent_size)
         self.fc_logvar = nn.LazyLinear(image_latent_size)
         self.z_fc = nn.LazyLinear(4 * int(512 / 8) * int(568 / 8))
         self.vae_dec = nn.Sequential(
-            nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
-            nn.LeakyReLU(),
-            nn.ConvTranspose2d(in_channels=4, out_channels=3, kernel_size=2, stride=2, padding=0),
+            # nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
+            # nn.LeakyReLU(),
+            # nn.ConvTranspose2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
+            # nn.LeakyReLU(),
+            # nn.ConvTranspose2d(in_channels=4, out_channels=3, kernel_size=2, stride=2, padding=0),
+            CNNDoubler(in_channels=4, out_channels=8, kernel_size=4),
+            CNNDoubler(in_channels=8, out_channels=4, kernel_size=4),
+            CNNDoubler(in_channels=4, out_channels=3, kernel_size=4),
             nn.Sigmoid()
         )
         self.vae_loss = VAELoss()
@@ -96,8 +130,7 @@ class Model(nn.Module):
         self.h = self.h.detach()
         self.c = self.c.detach()
 
-        resized_image, h, w, total = resize_to_multiple_of(image)
-        encoded_image = self.vae_enc(resized_image)
+        encoded_image = self.vae_enc(image)
         mu = self.fc_mu(encoded_image)
         logvar = self.fc_logvar(encoded_image)
         std = torch.exp(0.5 * logvar)
@@ -111,7 +144,7 @@ class Model(nn.Module):
         cv2.imshow("VAE reconstruction", numpy_image)
         cv2.waitKey(1)
 
-        vae_loss = self.vae_loss(resized_image, reconstructed_image, mu, logvar)
+        vae_loss = self.vae_loss(image, reconstructed_image, mu, logvar)
 
         n_h, n_c = self.lstm_main(z, (self.h, self.c))
         p_h, _ = self.lstm_pred(o_o, (self.h, self.c))

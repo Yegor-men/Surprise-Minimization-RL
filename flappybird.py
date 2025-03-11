@@ -9,12 +9,19 @@ from collections import deque
 import pygame
 from pygame.locals import *
 
-FPS = 30
+SIM_FPS = 30
 ANIMATION_SPEED = 0.18
 # ANIMATION_SPEED = 0.1
 WIN_WIDTH = 284 * 2
 WIN_HEIGHT = 512
 
+def frames_to_msec(frames, fps=SIM_FPS):
+    return 1000.0 * frames / fps
+
+def msec_to_frames(milliseconds, fps=SIM_FPS):
+    return fps * milliseconds / 1000.0
+
+msec_in_one_frame = frames_to_msec(1)
 
 class Bird(pygame.sprite.Sprite):
     WIDTH = HEIGHT = 32
@@ -30,17 +37,8 @@ class Bird(pygame.sprite.Sprite):
         self._mask_wingup = pygame.mask.from_surface(self._img_wingup)
         self._mask_wingdown = pygame.mask.from_surface(self._img_wingdown)
 
-    def update(self, delta_frames=1):
-        if self.msec_to_climb > 0:
-            # frac_climb_done = 1 - self.msec_to_climb / Bird.CLIMB_DURATION
-            # self.y -= (Bird.CLIMB_SPEED * frames_to_msec(delta_frames) *
-            #            (1 - math.cos(frac_climb_done * math.pi)))
-            self.y -= Bird.CLIMB_SPEED * frames_to_msec(delta_frames)
-            # self.msec_to_climb -= frames_to_msec(delta_frames)
-            self.msec_to_climb = 0
-        # THIS MAKES BIRD ALWAYS FALL
-        else:
-            self.y += Bird.SINK_SPEED * frames_to_msec(delta_frames)
+    def update(self, velocity):
+        self.y -= Bird.CLIMB_SPEED * msec_in_one_frame * velocity
 
         self.y = min(self.y, WIN_HEIGHT - Bird.HEIGHT)
         self.y = max(self.y, 0)
@@ -112,8 +110,8 @@ class PipePair(pygame.sprite.Sprite):
     def rect(self):
         return Rect(self.x, 0, PipePair.WIDTH, PipePair.PIECE_HEIGHT)
 
-    def update(self, delta_frames=1):
-        self.x -= ANIMATION_SPEED * frames_to_msec(delta_frames)
+    def update(self):
+        self.x -= ANIMATION_SPEED * msec_in_one_frame
 
     def collides_with(self, bird):
         return pygame.sprite.collide_mask(self, bird)
@@ -134,29 +132,11 @@ def load_images():
             'bird-wingdown': load_image('bird_wing_down.png')}
 
 
-def frames_to_msec(frames, fps=FPS):
-    return 1000.0 * frames / fps
 
-
-def msec_to_frames(milliseconds, fps=FPS):
-    return fps * milliseconds / 1000.0
 
 
 def is_bird_between_pipes(bird, pipe):
-    # Check horizontal overlap: bird's right side is after pipe's left edge
-    # and bird's left side is before pipe's right edge.
-    if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH:
-        return False
-    else:
-        return True
-    # # Define the vertical boundaries of the gap:
-    # gap_top = pipe.top_height_px  # bottom of top pipe
-    # gap_bottom = WIN_HEIGHT - pipe.bottom_height_px  # top of bottom pipe
-    #
-    # # Use the bird's vertical center for a robust check.
-    # bird_center_y = bird.y + Bird.HEIGHT / 2
-    #
-    # return gap_top < bird_center_y < gap_bottom
+    return False if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH else True
 
 
 import numpy as np
@@ -169,26 +149,23 @@ torch.cuda.manual_seed_all(0)
 
 
 def get_screenshot():
-    surface = pygame.display.get_surface()
-    arr = pygame.surfarray.array3d(surface)
-    tensor = torch.from_numpy(arr).float()
-    tensor = tensor.permute(2, 1, 0)
-    tensor = (tensor / 255)
-    return tensor.to("cuda")
+    arr = pygame.surfarray.array3d(pygame.display.get_surface())
+    return ((torch.from_numpy(arr).float().permute(2, 1, 0))/255).unsqueeze(0).to("cuda")
 
 
 import flappybird_model
-
+lat_size = 2048
 model = flappybird_model.Model(
-    hidden_size=2048,
-    image_latent_size=2048,
+    hidden_size=lat_size,
+    image_latent_size=lat_size,
 ).to("cuda")
 decoder = flappybird_model.Decoder(
-    hidden_size=2048,
+    hidden_size=lat_size,
     temperature=0.2
 ).to("cuda")
+
 loss_fn = flappybird_model.RewardFunction()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 model.train()
 optimizer.zero_grad()
 
@@ -224,8 +201,11 @@ def main():
     is_touching_pipe, touched_pipe = False, False
     model_go = True
 
+    curr_frame = 0
+
     while not done:
-        clock.tick(FPS)
+        clock.tick()
+        curr_frame += 1
 
         if not (paused or frame_clock % msec_to_frames(PipePair.ADD_INTERVAL)):
             pp = PipePair(images['pipe-end'], images['pipe-body'])
@@ -235,13 +215,13 @@ def main():
             if event.type == QUIT or (event.type == KEYUP and event.key == K_ESCAPE):
                 done = True
                 break
-            elif event.type == KEYUP and event.key in (K_PAUSE, K_p):
-                paused = not paused
-            elif event.type == MOUSEBUTTONUP or (event.type == KEYUP and event.key in (K_UP, K_RETURN, K_SPACE)):
-                bird.msec_to_climb = Bird.CLIMB_DURATION
+            # elif event.type == KEYUP and event.key in (K_PAUSE, K_p):
+            #     paused = not paused
+            # elif event.type == MOUSEBUTTONUP or (event.type == KEYUP and event.key in (K_UP, K_RETURN, K_SPACE)):
+            #     bird.msec_to_climb = Bird.CLIMB_DURATION
 
-        if paused:
-            continue
+        # if paused:
+        #     continue
 
         pipe_collision = any(p.collides_with(bird) for p in pipes)
         if pipe_collision:
@@ -264,29 +244,27 @@ def main():
 
         screenshot = get_screenshot()
 
-        if model_go is True:
-            vae_loss, euclid_dist, nh = model(screenshot, decoder.o_o)
-            loss = loss_fn(vae_loss, euclid_dist, is_touching_pipe, is_between_pipes)
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            no = decoder(nh)
+        vae_loss, euclid_dist, nh = model(screenshot, decoder.o_o)
+        loss = loss_fn(vae_loss, euclid_dist, is_touching_pipe, is_between_pipes)
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        no = decoder(nh)
 
-            print(f"L {loss.item():.3f}", end=" | ")
-            losses.append(loss.item())
-            print(f"VAE L {vae_loss.item():,}", end=" | ")
-            vae_losses.append(vae_loss.item())
-            print(f"S factor {euclid_dist.item():.5f}", end=" | ")
-            s_factors.append(euclid_dist.item())
-            print(f"Out {no.squeeze().item():.2f}", end=" | ")
-            outputs.append(no.squeeze().item())
-            print(f"Between: {is_between_pipes}", end=" | ")
-            print(f"Touching: {is_touching_pipe}", end=" | ")
-            print()
-            if round(no.squeeze().item()) == 1:
-                bird.msec_to_climb = Bird.CLIMB_DURATION
+        print(f"t: {curr_frame/30:.2f}", end=" | ")
+        print(f"L {loss.item():.3f}", end=" | ")
+        losses.append(loss.item())
+        print(f"VAE L {vae_loss.item():,}", end=" | ")
+        vae_losses.append(vae_loss.item())
+        print(f"S factor {euclid_dist.item():.5f}", end=" | ")
+        s_factors.append(euclid_dist.item())
+        print(f"Out {no.squeeze().item():.2f}", end=" | ")
+        outputs.append(no.squeeze().item())
+        print(f"Between: {is_between_pipes}", end=" | ")
+        print(f"Touching: {is_touching_pipe}", end=" | ")
+        print()
 
-        bird.update()
+        bird.update(velocity=round(no.squeeze().item())*2-1)
         display_surface.blit(bird.image, bird.rect)
 
         global scores
