@@ -10,10 +10,9 @@ class VAELoss(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def forward(self, x, x_reconstruction, mu, logvar):
+    def forward(self, x, x_reconstruction):
         recon_loss = F.mse_loss(x_reconstruction, x, reduction='sum')  # or mean
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
-        return recon_loss + kl_loss
+        return recon_loss
 
 
 class Decoder(nn.Module):
@@ -89,6 +88,22 @@ class CNNDoubler(nn.Module):
     def forward(self, image):
         return self.activation(self.cnn(image))
 
+
+class WidthResizer(nn.Module):
+    def __init__(self, height, width, mode='interp'):
+        super().__init__()
+        self.interp_mode="bicubic"
+        self.target_height = height
+        self.target_width = width
+        self.mode = mode
+
+    def forward(self, x):
+        if self.mode == 'avg':
+            return F.adaptive_avg_pool2d(x, (self.target_height, self.target_width))
+        elif self.mode == 'interp':
+            return F.interpolate(x, size=(self.target_height, self.target_width), mode=self.interp_mode, align_corners=False)
+
+
 class Model(nn.Module):
     def __init__(self, hidden_size, image_latent_size):
         super().__init__()
@@ -97,24 +112,49 @@ class Model(nn.Module):
         self.c = torch.zeros(1, hidden_size).to("cuda")
 
         self.vae_enc = nn.Sequential(
-            CNNOneToOne(in_channels=3, out_channels=3, kernel_size=4, stride=1, dilation=2),
-            CNNHalver(in_channels=3, out_channels=64, kernel_size=4),
+            CNNHalver(in_channels=3, out_channels=4, kernel_size=2),
+            CNNOneToOne(in_channels=4, out_channels=4, kernel_size=2, stride=1, dilation=2),
+            CNNHalver(in_channels=4, out_channels=8, kernel_size=4),
+            CNNOneToOne(in_channels=8, out_channels=8, kernel_size=2, stride=1, dilation=2),
+            CNNHalver(in_channels=8, out_channels=16, kernel_size=8),
+            CNNOneToOne(in_channels=16, out_channels=16, kernel_size=4, stride=1, dilation=2),
+            WidthResizer(height=64, width=64, mode='interp'),
+            CNNHalver(in_channels=16, out_channels=32, kernel_size=16),
+            CNNOneToOne(in_channels=32, out_channels=32, kernel_size=4, stride=1, dilation=2),
+            CNNHalver(in_channels=32, out_channels=64, kernel_size=32),
             CNNOneToOne(in_channels=64, out_channels=64, kernel_size=4, stride=1, dilation=2),
-            CNNHalver(in_channels=64, out_channels=128, kernel_size=4),
+            CNNHalver(in_channels=64, out_channels=128, kernel_size=16),
             CNNOneToOne(in_channels=128, out_channels=128, kernel_size=4, stride=1, dilation=2),
-            CNNHalver(in_channels=128, out_channels=4, kernel_size=4),
-            nn.Flatten()
+            CNNHalver(in_channels=128, out_channels=256, kernel_size=8),
+            CNNOneToOne(in_channels=256, out_channels=256, kernel_size=2, stride=1, dilation=2),
+            CNNHalver(in_channels=256, out_channels=512, kernel_size=4),
+            CNNOneToOne(in_channels=512, out_channels=512, kernel_size=2, stride=1, dilation=2),
+            CNNHalver(in_channels=512, out_channels=1024, kernel_size=2),
         )
-        self.fc_mu = nn.LazyLinear(image_latent_size)
-        self.fc_logvar = nn.LazyLinear(image_latent_size)
-        self.z_fc = nn.LazyLinear(4 * int(512 / 8) * int(568 / 8))
+        self.image_latent = nn.Sequential(
+            nn.Flatten(),
+            nn.LazyLinear(image_latent_size),
+            # nn.LeakyReLU(),
+        )
         self.vae_dec = nn.Sequential(
-            CNNOneToOne(in_channels=4, out_channels=4, kernel_size=4, stride=1, dilation=2),
-            CNNDoubler(in_channels=4, out_channels=128, kernel_size=4),
+            CNNDoubler(in_channels=1024, out_channels=512, kernel_size=2),
+            CNNOneToOne(in_channels=512, out_channels=512, kernel_size=2, stride=1, dilation=2),
+            CNNDoubler(in_channels=512, out_channels=256, kernel_size=4),
+            CNNOneToOne(in_channels=256, out_channels=256, kernel_size=2, stride=1, dilation=2),
+            CNNDoubler(in_channels=256, out_channels=128, kernel_size=8),
             CNNOneToOne(in_channels=128, out_channels=128, kernel_size=4, stride=1, dilation=2),
-            CNNDoubler(in_channels=128, out_channels=64, kernel_size=4),
+            CNNDoubler(in_channels=128, out_channels=64, kernel_size=16),
             CNNOneToOne(in_channels=64, out_channels=64, kernel_size=4, stride=1, dilation=2),
-            CNNDoubler(in_channels=64, out_channels=3, kernel_size=4),
+            CNNDoubler(in_channels=64, out_channels=32, kernel_size=32),
+            CNNOneToOne(in_channels=32, out_channels=32, kernel_size=4, stride=1, dilation=2),
+            CNNDoubler(in_channels=32, out_channels=16, kernel_size=16),
+            WidthResizer(height=64, width=int(568 / 8), mode='interp'),
+            CNNOneToOne(in_channels=16, out_channels=16, kernel_size=4, stride=1, dilation=2),
+            CNNDoubler(in_channels=16, out_channels=8, kernel_size=8),
+            CNNOneToOne(in_channels=8, out_channels=8, kernel_size=2, stride=1, dilation=2),
+            CNNDoubler(in_channels=8, out_channels=4, kernel_size=4),
+            CNNOneToOne(in_channels=4, out_channels=4, kernel_size=2, stride=1, dilation=2),
+            CNNDoubler(in_channels=4, out_channels=3, kernel_size=2),
             nn.Sigmoid()
         )
         self.vae_loss = VAELoss()
@@ -127,22 +167,16 @@ class Model(nn.Module):
         self.c = self.c.detach()
 
         encoded_image = self.vae_enc(image)
-        mu = self.fc_mu(encoded_image)
-        logvar = self.fc_logvar(encoded_image)
-        std = torch.exp(0.5 * logvar)
-        eps = torch.randn_like(std)
-        z = mu + eps * std
-        z_fc = self.z_fc(z)
-        z_reshaped = torch.reshape(z_fc, (1, 4, 64, 71))
-        reconstructed_image = self.vae_dec(z_reshaped)
+        image_latent = self.image_latent(encoded_image)
+        reconstructed_image = self.vae_dec(encoded_image)
 
         numpy_image = reconstructed_image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
         cv2.imshow("VAE reconstruction", numpy_image)
         cv2.waitKey(1)
 
-        vae_loss = self.vae_loss(image, reconstructed_image, mu, logvar)
+        vae_loss = self.vae_loss(image, reconstructed_image)
 
-        n_h, n_c = self.lstm_main(z, (self.h, self.c))
+        n_h, n_c = self.lstm_main(image_latent, (self.h, self.c))
         p_h, _ = self.lstm_pred(o_o, (self.h, self.c))
 
         euclid_dist = torch.cdist(n_h, p_h)

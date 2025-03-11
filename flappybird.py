@@ -154,7 +154,7 @@ def get_screenshot():
 
 
 import flappybird_model
-lat_size = 32
+lat_size = 512
 model = flappybird_model.Model(
     hidden_size=lat_size,
     image_latent_size=lat_size,
