@@ -97,28 +97,24 @@ class Model(nn.Module):
         self.c = torch.zeros(1, hidden_size).to("cuda")
 
         self.vae_enc = nn.Sequential(
-            # nn.Conv2d(in_channels=3, out_channels=4, kernel_size=2, stride=2, padding=0),
-            # nn.LeakyReLU(),
-            # nn.Conv2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
-            # nn.LeakyReLU(),
-            # nn.Conv2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
-            CNNHalver(in_channels=3, out_channels=4, kernel_size=4),
-            CNNHalver(in_channels=4, out_channels=8, kernel_size=4),
-            CNNHalver(in_channels=8, out_channels=4, kernel_size=4),
+            CNNOneToOne(in_channels=3, out_channels=3, kernel_size=4, stride=1, dilation=2),
+            CNNHalver(in_channels=3, out_channels=64, kernel_size=4),
+            CNNOneToOne(in_channels=64, out_channels=64, kernel_size=4, stride=1, dilation=2),
+            CNNHalver(in_channels=64, out_channels=128, kernel_size=4),
+            CNNOneToOne(in_channels=128, out_channels=128, kernel_size=4, stride=1, dilation=2),
+            CNNHalver(in_channels=128, out_channels=4, kernel_size=4),
             nn.Flatten()
         )
         self.fc_mu = nn.LazyLinear(image_latent_size)
         self.fc_logvar = nn.LazyLinear(image_latent_size)
         self.z_fc = nn.LazyLinear(4 * int(512 / 8) * int(568 / 8))
         self.vae_dec = nn.Sequential(
-            # nn.ConvTranspose2d(in_channels=4, out_channels=8, kernel_size=2, stride=2, padding=0),
-            # nn.LeakyReLU(),
-            # nn.ConvTranspose2d(in_channels=8, out_channels=4, kernel_size=2, stride=2, padding=0),
-            # nn.LeakyReLU(),
-            # nn.ConvTranspose2d(in_channels=4, out_channels=3, kernel_size=2, stride=2, padding=0),
-            CNNDoubler(in_channels=4, out_channels=8, kernel_size=4),
-            CNNDoubler(in_channels=8, out_channels=4, kernel_size=4),
-            CNNDoubler(in_channels=4, out_channels=3, kernel_size=4),
+            CNNOneToOne(in_channels=4, out_channels=4, kernel_size=4, stride=1, dilation=2),
+            CNNDoubler(in_channels=4, out_channels=128, kernel_size=4),
+            CNNOneToOne(in_channels=128, out_channels=128, kernel_size=4, stride=1, dilation=2),
+            CNNDoubler(in_channels=128, out_channels=64, kernel_size=4),
+            CNNOneToOne(in_channels=64, out_channels=64, kernel_size=4, stride=1, dilation=2),
+            CNNDoubler(in_channels=64, out_channels=3, kernel_size=4),
             nn.Sigmoid()
         )
         self.vae_loss = VAELoss()

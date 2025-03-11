@@ -154,7 +154,7 @@ def get_screenshot():
 
 
 import flappybird_model
-lat_size = 2048
+lat_size = 32
 model = flappybird_model.Model(
     hidden_size=lat_size,
     image_latent_size=lat_size,
@@ -165,7 +165,7 @@ decoder = flappybird_model.Decoder(
 ).to("cuda")
 
 loss_fn = flappybird_model.RewardFunction()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 model.train()
 optimizer.zero_grad()
 
