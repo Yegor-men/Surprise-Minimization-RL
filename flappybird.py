@@ -150,7 +150,10 @@ torch.cuda.manual_seed_all(0)
 
 def get_screenshot():
     arr = pygame.surfarray.array3d(pygame.display.get_surface())
-    return ((torch.from_numpy(arr).float().permute(2, 1, 0))/255).unsqueeze(0).to("cuda")
+    arr = arr.transpose(0, 1, 2)
+    arr = arr[..., [2, 1, 0]]
+    tensor = torch.from_numpy(arr).float().div(255.0).permute(2,1, 0).unsqueeze(0)
+    return tensor.to("cuda")
 
 
 import flappybird_model
@@ -242,6 +245,8 @@ def main():
                 is_between_pipes = True if not is_touching_pipe else False
             display_surface.blit(p.image, p.rect)
 
+        display_surface.blit(bird.image, bird.rect)
+
         screenshot = get_screenshot()
 
         vae_loss, euclid_dist, nh = model(screenshot, decoder.o_o)
@@ -265,7 +270,6 @@ def main():
         print()
 
         bird.update(velocity=round(no.squeeze().item())*2-1)
-        display_surface.blit(bird.image, bird.rect)
 
         global scores
         for p in pipes:

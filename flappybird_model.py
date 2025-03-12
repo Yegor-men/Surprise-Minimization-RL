@@ -150,7 +150,7 @@ class Model(nn.Module):
 
         in_image = image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
         numpy_image = reconstructed_image.squeeze().permute(1, 2, 0).cpu().detach().numpy()
-        cv2.imshow("VAE reconstruction", in_image)
+        cv2.imshow("VAE reconstruction", numpy_image)
         cv2.waitKey(1)
 
         vae_loss = self.vae_loss(image, reconstructed_image)
