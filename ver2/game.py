@@ -15,13 +15,17 @@ ANIMATION_SPEED = 0.18
 WIN_WIDTH = 284 * 2
 WIN_HEIGHT = 512
 
+
 def frames_to_msec(frames, fps=SIM_FPS):
     return 1000.0 * frames / fps
+
 
 def msec_to_frames(milliseconds, fps=SIM_FPS):
     return fps * milliseconds / 1000.0
 
+
 msec_in_one_frame = frames_to_msec(1)
+
 
 class Bird(pygame.sprite.Sprite):
     WIDTH = HEIGHT = 32
@@ -132,9 +136,6 @@ def load_images():
             'bird-wingdown': load_image('bird_wing_down.png')}
 
 
-
-
-
 def is_bird_between_pipes(bird, pipe):
     return False if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH else True
 
@@ -152,32 +153,31 @@ def get_screenshot():
     arr = pygame.surfarray.array3d(pygame.display.get_surface())
     arr = arr.transpose(0, 1, 2)
     arr = arr[..., [2, 1, 0]]
-    tensor = torch.from_numpy(arr).float().div(255.0).permute(2,1, 0).unsqueeze(0)
+    tensor = torch.from_numpy(arr).float().div(255.0).permute(2, 1, 0).unsqueeze(0)
     return tensor.to("cuda")
 
 
-import flappybird_model
+from ver2 import model as models
+
 hidden_size = 128
 image_latent_size = 128
 
-model = flappybird_model.Model(
-    hidden_size=hidden_size,
-    image_latent_size=image_latent_size,
-).to("cuda")
-decoder = flappybird_model.Decoder(
-    hidden_size=hidden_size,
-    temperature=0.1
+model = models.Model(
+    image_history_length=2,
+    h_c_size=512,
+    compressed_image_size=128,
+    reconstructed_image_size=(3, 64, 64),
+    input_shape=(3, 512, 568),
 ).to("cuda")
 
-loss_fn = flappybird_model.RewardFunction()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
+loss_fn = models.ReinforceLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
 model.train()
 optimizer.zero_grad()
 
 losses = []
-vae_losses = []
-s_factors = []
-outputs = []
+reconstruction_losses = []
+log_probs = []
 scores = [0]
 
 
@@ -251,28 +251,30 @@ def main():
 
         screenshot = get_screenshot()
 
-        vae_loss, s_factor, nh = model(screenshot, decoder.o_o)
-        loss = loss_fn(vae_loss, s_factor, is_touching_pipe, is_between_pipes)
+        choice, logprob, recon_loss = model(screenshot)
+        loss = loss_fn(logprob, is_touching_pipe, recon_loss)
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()
-        no = decoder(nh)
 
-        print(f"t: {curr_frame/30:.2f}", end=" | ")
-        print(f"L {loss.item():.3f}", end=" | ")
+        print(f"t: {curr_frame / 30:.2f}", end=" | ")
+        print(f"L: {loss.item():.3f}", end=" | ")
         losses.append(loss.item())
-        print(f"AE L {vae_loss.item():,}", end=" | ")
-        vae_losses.append(vae_loss.item())
-        print(f"S factor {s_factor.item():.5f}", end=" | ")
-        s_factors.append(s_factor.item())
-        out_uncertainty = -abs(-2*no.squeeze().item()+1)+1
-        print(f"Out uncertainty {out_uncertainty:.2f}", end=" | ")
-        outputs.append(out_uncertainty)
+        print(f"RL: {recon_loss.item():,}", end=" | ")
+        reconstruction_losses.append(recon_loss.item())
+        print(f"Logprob: {logprob:.2f}", end=" | ")
+        log_probs.append(logprob)
         print(f"Between: {is_between_pipes}", end=" | ")
         print(f"Touching: {is_touching_pipe}", end=" | ")
         print()
 
-        bird.update(velocity=round(no.squeeze().item())*2-1)
+        model.update_hidden_states()
+
+        if round(choice.squeeze().item()) == 0:
+            bird.update(velocity=-1)
+        else:
+            bird.update(velocity=1)
+
 
         global scores
         for p in pipes:
@@ -294,7 +296,7 @@ main()
 
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(3, 2, figsize=(10, 15))
+fig, axes = plt.subplots(2, 2, figsize=(10, 10))
 
 axes = axes.flatten()
 
@@ -304,17 +306,14 @@ axes[0].set_title('Loss')
 # axes[1].plot(vae_losses)
 # axes[1].set_title('VAE loss')
 
-axes[2].plot(vae_losses)
-axes[2].set_title('VAE Loss')
+axes[1].plot(reconstruction_losses)
+axes[1].set_title('Reconstruction Loss')
 
-axes[3].plot(s_factors)
-axes[3].set_title('S factor')
+axes[2].plot(log_probs)
+axes[2].set_title('Log probabilities')
 
-axes[4].plot(outputs)
-axes[4].set_title('Output uncertainty')
-
-axes[5].plot(scores)
-axes[5].set_title('Scores')
+axes[3].plot(scores)
+axes[3].set_title('Scores')
 
 plt.tight_layout()
 
