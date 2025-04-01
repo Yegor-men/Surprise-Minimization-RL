@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from torch import distributions as dist
+from torchvision.utils import make_grid
 
 torch.manual_seed(0)
 torch.cuda.manual_seed_all(0)
@@ -94,8 +95,6 @@ class Model(nn.Module):
             nn.LeakyReLU(),
             nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, stride=2, padding=0),
             nn.LeakyReLU(),
-            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=3, stride=2, padding=0),
-            nn.LeakyReLU(),
             nn.Flatten(),
             nn.LeakyReLU(),
             nn.LazyLinear(out_features=compressed_image_size),
@@ -111,28 +110,29 @@ class Model(nn.Module):
         )
 
     def update_hidden_states(self):
-        oldest_image = self.image_history.get_oldest()
+        oldest_image = self.image_history.get_oldest().unsqueeze(0)
         with torch.no_grad():
             compressed_image = self.image_encoder(oldest_image)
             _, (n_h, n_c) = self.lstm(compressed_image, (self.h, self.c))
             self.h, self.c = n_h.detach(), n_c.detach()
 
     def forward(self, new_image):
-        self.image_history.add_element(new_image)
+        self.image_history.add_element(new_image.squeeze())
         images = self.image_history.return_queue_as_batched_tensor()
         small_images = self.resolution_resizer(images).detach()
         compressed_images = self.image_encoder(images)
         temp_h, temp_c = self.h, self.c
         for i in range(compressed_images.size(0)):
-            _, (temp_h, temp_c) = self.lstm(compressed_images[i], (temp_h, temp_c))
+            _, (temp_h, temp_c) = self.lstm(compressed_images[i].unsqueeze(0), (temp_h, temp_c))
         distribution_logit = self.choice_maker(temp_h)
         distribution = dist.Bernoulli(logits=distribution_logit)
         choice = distribution.sample()
         logprob = distribution.log_prob(choice)
 
         reconstructed_images = self.image_reconstructor(compressed_images)
-        numpy_images = reconstructed_images.squeeze().permute(0, 2, 3, 1).cpu().detach().numpy()
-        cv2.imshow("VAE reconstruction", numpy_images)
+        grid = make_grid(reconstructed_images, nrow=4)
+        numpy_grid = grid.permute(1, 2, 0).cpu().detach().numpy()
+        cv2.imshow("VAE reconstruction", numpy_grid)
         cv2.waitKey(1)
 
         reconstruction_loss = F.mse_loss(reconstructed_images, small_images, reduction='sum')

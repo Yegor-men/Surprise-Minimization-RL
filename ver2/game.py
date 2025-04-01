@@ -154,7 +154,7 @@ def get_screenshot():
     arr = arr.transpose(0, 1, 2)
     arr = arr[..., [2, 1, 0]]
     tensor = torch.from_numpy(arr).float().div(255.0).permute(2, 1, 0).unsqueeze(0)
-    return tensor.to("cuda")
+    return tensor
 
 
 from ver2 import model as models
@@ -163,12 +163,12 @@ hidden_size = 128
 image_latent_size = 128
 
 model = models.Model(
-    image_history_length=2,
+    image_history_length=16,
     h_c_size=512,
     compressed_image_size=128,
     reconstructed_image_size=(3, 64, 64),
     input_shape=(3, 512, 568),
-).to("cuda")
+)
 
 loss_fn = models.ReinforceLoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
@@ -262,8 +262,8 @@ def main():
         losses.append(loss.item())
         print(f"RL: {recon_loss.item():,}", end=" | ")
         reconstruction_losses.append(recon_loss.item())
-        print(f"Logprob: {logprob:.2f}", end=" | ")
-        log_probs.append(logprob)
+        print(f"Logprob: {logprob.item():.2f}", end=" | ")
+        log_probs.append(logprob.item())
         print(f"Between: {is_between_pipes}", end=" | ")
         print(f"Touching: {is_touching_pipe}", end=" | ")
         print()
