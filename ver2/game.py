@@ -9,7 +9,7 @@ from collections import deque
 import pygame
 from pygame.locals import *
 
-SIM_FPS = 30
+SIM_FPS = 15
 ANIMATION_SPEED = 0.18
 # ANIMATION_SPEED = 0.1
 WIN_WIDTH = 284 * 2
@@ -137,7 +137,9 @@ def load_images():
 
 
 def is_bird_between_pipes(bird, pipe):
-    return False if bird.x + Bird.WIDTH < pipe.x or bird.x > pipe.x + PipePair.WIDTH else True
+    bird_center = bird.x + Bird.WIDTH / 2
+    return pipe.x < bird_center < pipe.x + PipePair.WIDTH
+
 
 
 import numpy as np
@@ -153,31 +155,30 @@ def get_screenshot():
     arr = pygame.surfarray.array3d(pygame.display.get_surface())
     arr = arr.transpose(0, 1, 2)
     arr = arr[..., [2, 1, 0]]
-    tensor = torch.from_numpy(arr).float().div(255.0).permute(2, 1, 0).unsqueeze(0)
+    tensor = torch.from_numpy(arr).float().div(255.0).permute(2, 1, 0).unsqueeze(0).to("cuda")
     return tensor
 
 
 from ver2 import model as models
 
-hidden_size = 128
-image_latent_size = 128
-
 model = models.Model(
-    image_history_length=16,
-    h_c_size=512,
-    compressed_image_size=128,
+    image_history_length=25,
+    h_c_size=32,
+    compressed_image_size=1024,
     reconstructed_image_size=(3, 64, 64),
-    input_shape=(3, 512, 568),
-)
+    reshape_image_to=(3, 512, 568),
+).to("cuda")
 
 loss_fn = models.ReinforceLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.0001)
 model.train()
 optimizer.zero_grad()
 
 losses = []
 reconstruction_losses = []
 log_probs = []
+entropies = []
+rewards = []
 scores = [0]
 
 
@@ -251,19 +252,24 @@ def main():
 
         screenshot = get_screenshot()
 
-        choice, logprob, recon_loss = model(screenshot)
-        loss = loss_fn(logprob, is_touching_pipe, recon_loss)
+        choice, logprob, entropy, recon_loss = model(screenshot)
+        loss, reward = loss_fn(logprob, entropy, is_touching_pipe, is_between_pipes)
         loss.backward()
+        recon_loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
         print(f"t: {curr_frame / 30:.2f}", end=" | ")
+        print(f"Logprob: {logprob.item():.3f}", end=" | ")
+        log_probs.append(logprob.item())
+        print(f"E: {entropy.item():.3f}", end=" | ")
+        entropies.append(entropy.item())
         print(f"L: {loss.item():.3f}", end=" | ")
         losses.append(loss.item())
+        print(f"R: {reward}", end=" | ")
+        rewards.append(reward)
         print(f"RL: {recon_loss.item():,}", end=" | ")
         reconstruction_losses.append(recon_loss.item())
-        print(f"Logprob: {logprob.item():.2f}", end=" | ")
-        log_probs.append(logprob.item())
         print(f"Between: {is_between_pipes}", end=" | ")
         print(f"Touching: {is_touching_pipe}", end=" | ")
         print()
@@ -274,7 +280,6 @@ def main():
             bird.update(velocity=-1)
         else:
             bird.update(velocity=1)
-
 
         global scores
         for p in pipes:
@@ -296,24 +301,27 @@ main()
 
 import matplotlib.pyplot as plt
 
-fig, axes = plt.subplots(2, 2, figsize=(10, 10))
+fig, axes = plt.subplots(3, 2, figsize=(10, 15))
 
 axes = axes.flatten()
 
 axes[0].plot(losses)
 axes[0].set_title('Loss')
 
-# axes[1].plot(vae_losses)
-# axes[1].set_title('VAE loss')
+axes[1].plot(entropies)
+axes[1].set_title('Entropy over time')
 
-axes[1].plot(reconstruction_losses)
-axes[1].set_title('Reconstruction Loss')
+axes[2].plot(reconstruction_losses)
+axes[2].set_title('Reconstruction Loss')
 
-axes[2].plot(log_probs)
-axes[2].set_title('Log probabilities')
+axes[3].plot(log_probs)
+axes[3].set_title('Log probabilities')
 
-axes[3].plot(scores)
-axes[3].set_title('Scores')
+axes[4].plot(scores)
+axes[4].set_title('Scores')
+
+axes[5].plot(rewards)
+axes[5].set_title("Rewards")
 
 plt.tight_layout()
 
